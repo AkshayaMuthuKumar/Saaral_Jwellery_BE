@@ -23,7 +23,7 @@ app.use(express.json());
 app.use('/api/products', productRoutes);
 app.use('/api/auth', authRoutes);
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3306;
 
 app.post('/create-order', async (req, res) => {
   const { amount, currency } = req.body; 
