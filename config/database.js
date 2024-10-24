@@ -1,11 +1,19 @@
 const mysql = require('mysql2/promise');
 
 // Create a connection pool with mysql2
+// const db = mysql.createPool({
+//   host: 'localhost',
+//   user: 'root',
+//   password: 'akshaya1907*', // Replace with your MySQL password
+//   database: 'jewelry_shop',
+//   waitForConnections: true,
+// });
+
 const db = mysql.createPool({
-  host: 'localhost',
-  user: 'root',
-  password: 'akshaya1907*', // Replace with your MySQL password
-  database: 'jewelry_shop',
+  host: 'btg0sxj4cdg2aizb2j9a-mysql.services.clever-cloud.com',
+  user: 'uqonat92lueb1n93',
+  password: 'uqonat92lueb1n93', // Replace with your MySQL password
+  database: 'btg0sxj4cdg2aizb2j9a',
   waitForConnections: true,
 });
 
