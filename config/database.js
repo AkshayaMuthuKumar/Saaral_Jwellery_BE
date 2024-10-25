@@ -12,7 +12,7 @@ const mysql = require('mysql2/promise');
 const db = mysql.createPool({
   host: 'btg0sxj4cdg2aizb2j9a-mysql.services.clever-cloud.com',
   user: 'uqonat92lueb1n93',
-  password: 'uqonat92lueb1n93', // Replace with your MySQL password
+  password: 'IE6umfeDZ4MCJ80tulzA',
   database: 'btg0sxj4cdg2aizb2j9a',
   waitForConnections: true,
 });
