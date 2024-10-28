@@ -1,42 +1,101 @@
 const { pool, generateProductId } = require('../config/database'); // Adjust the path as needed
 const multer = require('multer');
 const path = require('path');
+const s3Client = require('../config/s3config'); // Import S3 config
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    // Directory where files will be saved
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname)); // Unique file name
-  },
-});
+const storage = multer.memoryStorage();
 const upload = multer({ storage });
+
+const { PutObjectCommand } = require("@aws-sdk/client-s3");
+
+const uploadToS3 = async (file, productId) => {
+  const bucketName = process.env.CC_FS_BUCKET_NAME;
+  const fileName = `${productId}-${Date.now()}-${file.originalname}`;
+
+  console.log(`Bucket Name: ${bucketName}`);
+  console.log(`File Name: ${fileName}`);
+  
+  const params = {
+    Bucket: bucketName,
+    Key: fileName,
+    Body: file.buffer,
+    ContentType: 'image/jpeg', // or appropriate MIME type
+    ACL: 'public-read',
+  };
+
+  try {
+    const command = new PutObjectCommand(params);
+    await s3Client.send(command); // Send the command to S3Client
+    const fileUrl = `${process.env.CC_FS_BUCKET_URL}/${fileName}`; // Generate URL for the uploaded file
+    return fileUrl;
+  } catch (error) {
+    console.error("Error uploading to S3:", error);
+    throw new Error("Could not upload image");
+  }
+};
+
+
+
 
 
 const addProduct = async (req, res) => {
   try {
     const { name, price, category, subcategory, occasion, stock, size } = req.body;
 
-    // Check required fields
-    if (!name || !category || !subcategory || !price || !stock || !occasion) {
-      return res.status(400).json({ message: "All fields except size and image are required" });
+    if (!name || !category || !subcategory || !price || !stock || !occasion || !req.file) {
+      return res.status(400).json({ message: "All fields except size are required" });
     }
-
-    const image = req.file.path;
 
     // Generate product ID
     const productId = await generateProductId(category);
 
-    // Insert a new product into the database
-    const [result] = await pool.query(`
-      INSERT INTO products (product_id, name, category, subcategory, occasion, image, price, stock, size)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [productId, name, category, subcategory, occasion, image, price, stock, size || null]); // Ensure 'subcategory' is included here
+    // Upload image to S3 and get the URL
+    const imageUrl = await uploadToS3(req.file, productId);
+
+    // Insert product into the database with image URL
+    const [result] = await pool.query(
+      `INSERT INTO products (product_id, name, category, subcategory, occasion, image, price, stock, size)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [productId, name, category, subcategory, occasion, imageUrl, price, stock, size || null]
+    );
 
     res.status(201).json({ message: 'Product added successfully', productId: result.insertId });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: `Error adding product: ${error.message}` });
+  }
+};
+
+const addCategory = async (req, res) => {
+  const { category_name, subcategory_name } = req.body;
+
+  if (!category_name || !subcategory_name) {
+    return res.status(400).json({ message: "Category and Subcategory names are required." });
+  }
+
+  try {
+    let imageUrl = null;
+
+    // Upload image to S3 if provided
+    if (req.file) {
+      imageUrl = await uploadToS3(req.file, category_name);  // Use category_name or unique ID
+    }
+
+    // Insert category into the database with image URL
+    const [result] = await pool.query(
+      "INSERT INTO category (category_name, subcategory_name, image) VALUES (?, ?, ?)",
+      [category_name, subcategory_name, imageUrl]
+    );
+
+    res.status(201).json({ message: "Category added successfully", id: result.insertId });
+  } catch (error) {
+    console.error(error);
+
+    if (error.code === 'ER_DUP_ENTRY') {
+      res.status(409).json({ message: `Duplicate entry: ${subcategory_name} already exists.` });
+    } else {
+      res.status(500).json({ message: "Error adding category", error: error.message });
+    }
   }
 };
 
@@ -67,43 +126,31 @@ const getProductsByOccasion = async (req, res) => {
     const offset = (pageNumber - 1) * limitNumber;
 
     let priceCondition = '';
-    if (priceRange && priceRange !== 'all') {
+    if (priceRange !== 'all') {
       const [minPrice, maxPrice] = priceRange.split('-').map(Number);
       priceCondition = `AND price BETWEEN ${minPrice} AND ${maxPrice}`;
     }
 
-    const [rows] = await pool.query(`
-      SELECT product_id, name, category, subcategory, occasion, image, size, price, stock 
-      FROM products
-      WHERE occasion = ? ${priceCondition}
-      LIMIT ?, ?
-    `, [occasion, offset, limitNumber]);
+    const [rows] = await pool.query(
+      `SELECT product_id, name, category, subcategory, occasion, image, size, price, stock 
+      FROM products WHERE occasion = ? ${priceCondition} LIMIT ?, ?`,
+      [occasion, offset, limitNumber]
+    );
 
-    const [totalCount] = await pool.query(`
-      SELECT COUNT(*) as count 
-      FROM products
-      WHERE occasion = ? ${priceCondition}
-    `, [occasion]);
+    const [totalCount] = await pool.query(
+      `SELECT COUNT(*) as count FROM products WHERE occasion = ? ${priceCondition}`,
+      [occasion]
+    );
 
     const totalPages = Math.ceil(totalCount[0].count / limitNumber);
 
-    // Format the image URLs for the fetched products
-    const formatProductImages = (products) => {
-      return products.map(product => ({
-        ...product,
-        image: `${req.protocol}://${req.get('host')}/${product.image.replace(/\\/g, '/')}` // Correct the image path format
-      }));
-    };
-
-    // Format the images for the occasion-based products
-    const formattedProducts = formatProductImages(rows);
-
-    res.json({ products: formattedProducts, totalPages });
+    res.json({ products: rows, totalPages });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Error fetching products by occasion' });
   }
 };
+
 
 const getSizesByCategory = async (req, res) => {
   try {
@@ -199,8 +246,11 @@ const getProductsByCategory = async (req, res) => {
     const totalPages = Math.ceil(totalCount[0].count / limitNumber);
     const formattedProducts = rows.map(product => ({
       ...product,
-      image: `${req.protocol}://${req.get('host')}/${product.image.replace(/\\/g, '/')}`,
-    }));
+      image: s3.getSignedUrl('getObject', {
+        Bucket: bucketName,
+        Key: product.image,  // Assuming `image` is the S3 key for each product
+        Expires: 60 * 60,    // URL expires in 1 hour
+  })}));
 
     // Send the filtered products and pagination info
     res.json({ products: formattedProducts, totalPages });
@@ -233,8 +283,12 @@ const getAllProducts = async (req, res) => {
     const formatProductImages = (products) => {
       return products.map(product => ({
         ...product,
-        image: `${req.protocol}://${req.get('host')}/${product.image.replace(/\\/g, '/')}` // Correct the image path format
-      }));
+        image: s3.getSignedUrl('getObject', {
+          Bucket: bucketName,
+          Key: product.image,  // Assuming `image` is the S3 key for each product
+          Expires: 60 * 60,    // URL expires in 1 hour
+
+    })}));
     };
 
     const formattedProducts = formatProductImages(rows);
@@ -246,8 +300,6 @@ const getAllProducts = async (req, res) => {
     res.status(500).json({ message: 'Error fetching products' });
   }
 };
-
-
 
 const getOccasions = async (req, res) => {
   try {
@@ -289,6 +341,7 @@ const getCategories = async (req, res) => {
     const formattedCategories = rows.map(row => ({
       category_name: row.category_name,
       // Format the image URL correctly
+      
       image: `${req.protocol}://${req.get('host')}/${row.image.replace(/\\/g, '/')}`,
       subcategories: row.subcategories.split(','),
     }));
@@ -303,34 +356,6 @@ const getCategories = async (req, res) => {
 
 
 
-const addCategory = async (req, res) => {
-  console.log(req.body); // Log the body to see if category_name and subcategory_name are present
-  console.log(req.file);  // Log the file to check if the image is uploaded
-
-  const { category_name, subcategory_name } = req.body;
-  if (!category_name || !subcategory_name) {
-    return res.status(400).json({ message: "Category and Subcategory names are required." });
-  }
-
-  const image = req.file ? req.file.path : null; // Ensure image is available
-
-  try {
-    const result = await pool.query(
-      "INSERT INTO category (category_name, subcategory_name, image) VALUES (?, ?, ?)",
-      [category_name, subcategory_name, image]
-    );
-    res.status(201).json({ message: "Category added successfully", id: result.insertId });
-  } catch (error) {
-    console.error(error);
-
-    // Check for duplicate entry error
-    if (error.code === 'ER_DUP_ENTRY') {
-      res.status(409).json({ message: `Duplicate entry: ${subcategory_name} already exists.` });
-    } else {
-      res.status(500).json({ message: "Error adding category", error: error.message });
-    }
-  }
-};
 
 
 const getProductById = async (req, res) => {
@@ -348,8 +373,14 @@ const getProductById = async (req, res) => {
     const product = rows[0];
 
     // Format the image URL
-    product.image = `${req.protocol}://${req.get('host')}/${product.image.replace(/\\/g, '/')}`; // Correct the image path format
+    const signedUrl = s3.getSignedUrl('getObject', {
+      Bucket: bucketName,
+      Key: product.image,  // Assuming `image` is the S3 key for each product
+      Expires: 60 * 60,    // URL expires in 1 hour
+  });
 
+  // Update product.image with the signed URL
+  product.image = signedUrl;
     // Fetch sizes associated with the product
     const [sizeRows] = await pool.query(
       'SELECT DISTINCT size FROM products WHERE name = ? AND category = ?',
@@ -480,8 +511,6 @@ const getCartItems = async (req, res) => {
     if (rows.length === 0) {
       return res.json({ items: [] }); // Return an empty array for cart items
     }
-    console.log("rows", rows)
-
 
     res.json({ items: rows });
   } catch (error) {
@@ -509,7 +538,6 @@ const clearCart = async (req, res) => {
 
 const removeCartItem = async (req, res) => {
   const { userId, productId, size } = req.body;
-  console.log("Removing item with:", { userId, productId, size });
 
   // Validate the required fields
   if (!userId || !productId || !size) {
@@ -523,11 +551,6 @@ const removeCartItem = async (req, res) => {
       [parseInt(userId, 10), productId.toString(), size] // Convert productId to string
     );
 
-    // Log the result for debugging
-    console.log('Query Result:', result);
-
-    // Check if any rows were affected
-    console.log('Affected Rows:', result.affectedRows);
     if (result.affectedRows > 0) {
       return res.status(200).json({ message: "Item removed from cart" });
     } else {
