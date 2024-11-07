@@ -1,41 +1,9 @@
 const { pool, generateProductId } = require('../config/database'); // Adjust the path as needed
 const multer = require('multer');
 const path = require('path');
-const s3Client = require('../config/s3config'); // Import S3 config
 
 const storage = multer.memoryStorage();
-const upload = multer({ storage });
-
-const { PutObjectCommand } = require("@aws-sdk/client-s3");
-
-const uploadToS3 = async (file, productId) => {
-  const bucketName = process.env.CC_FS_BUCKET_NAME;
-  const fileName = `${productId}-${Date.now()}-${file.originalname}`;
-
-  console.log(`Bucket Name: ${bucketName}`);
-  console.log(`File Name: ${fileName}`);
-  
-  const params = {
-    Bucket: bucketName,
-    Key: fileName,
-    Body: file.buffer,
-    ContentType: 'image/jpeg', // or appropriate MIME type
-    ACL: 'public-read',
-  };
-
-  try {
-    const command = new PutObjectCommand(params);
-    await s3Client.send(command); // Send the command to S3Client
-    const fileUrl = `${process.env.CC_FS_BUCKET_URL}/${fileName}`; // Generate URL for the uploaded file
-    return fileUrl;
-  } catch (error) {
-    console.error("Error uploading to S3:", error);
-    throw new Error("Could not upload image");
-  }
-};
-
-
-
+const upload = multer({ storage: multer.memoryStorage() });
 
 
 const addProduct = async (req, res) => {
@@ -46,11 +14,10 @@ const addProduct = async (req, res) => {
       return res.status(400).json({ message: "All fields except size are required" });
     }
 
-    // Generate product ID
     const productId = await generateProductId(category);
 
     // Upload image to S3 and get the URL
-    const imageUrl = await uploadToS3(req.file, productId);
+    const imageUrl = req.file.buffer;;
 
     // Insert product into the database with image URL
     const [result] = await pool.query(
@@ -74,14 +41,10 @@ const addCategory = async (req, res) => {
   }
 
   try {
-    let imageUrl = null;
+    const imageUrl = req.file.buffer;;
 
-    // Upload image to S3 if provided
-    if (req.file) {
-      imageUrl = await uploadToS3(req.file, category_name);  // Use category_name or unique ID
-    }
 
-    // Insert category into the database with image URL
+    // Insert category into the database with the image blob
     const [result] = await pool.query(
       "INSERT INTO category (category_name, subcategory_name, image) VALUES (?, ?, ?)",
       [category_name, subcategory_name, imageUrl]
@@ -89,7 +52,7 @@ const addCategory = async (req, res) => {
 
     res.status(201).json({ message: "Category added successfully", id: result.insertId });
   } catch (error) {
-    console.error(error);
+    console.error("Error in addCategory:", error);
 
     if (error.code === 'ER_DUP_ENTRY') {
       res.status(409).json({ message: `Duplicate entry: ${subcategory_name} already exists.` });
@@ -99,22 +62,30 @@ const addCategory = async (req, res) => {
   }
 };
 
+
+
 const addOccasion = async (req, res) => {
   const { name } = req.body;
-  if (!name) {
-    return res.status(400).json({ message: "Name is required" });
+  if (!name || !req.file) {
+    return res.status(400).json({ message: "Name and image are required" });
   }
 
   try {
-    const result = await pool.query("INSERT INTO occasions (name) VALUES (?)", [
-      name,
-    ]);
-    res.status(201).json({ message: "occasions added successfully", id: result.insertId });
+    const imageBlob = req.file.buffer;
+
+    // Insert the occasion name and image blob into the database
+    const [result] = await pool.query(
+      "INSERT INTO occasions (name, image) VALUES (?, ?)",
+      [name, imageBlob]
+    );
+
+    res.status(201).json({ message: "Occasion added successfully", id: result.insertId });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: "Error adding occasions" });
+    res.status(500).json({ message: "Error adding occasion" });
   }
 };
+
 
 const getProductsByOccasion = async (req, res) => {
   try {
@@ -125,31 +96,49 @@ const getProductsByOccasion = async (req, res) => {
     const limitNumber = parseInt(limit, 10);
     const offset = (pageNumber - 1) * limitNumber;
 
+    // Set up the price range condition if provided
     let priceCondition = '';
+    const queryParams = [occasion, offset, limitNumber];
+
     if (priceRange !== 'all') {
       const [minPrice, maxPrice] = priceRange.split('-').map(Number);
-      priceCondition = `AND price BETWEEN ${minPrice} AND ${maxPrice}`;
+      priceCondition = `AND price BETWEEN ? AND ?`;
+      queryParams.splice(1, 0, minPrice, maxPrice); // Insert minPrice and maxPrice in the query parameters
     }
 
+    // Fetch products by occasion with the specified price range, if any
     const [rows] = await pool.query(
       `SELECT product_id, name, category, subcategory, occasion, image, size, price, stock 
       FROM products WHERE occasion = ? ${priceCondition} LIMIT ?, ?`,
-      [occasion, offset, limitNumber]
+      queryParams
     );
 
+    // Count total products for pagination
+    const countQueryParams = [occasion];
+    if (priceRange !== 'all') {
+      countQueryParams.splice(1, 0, minPrice, maxPrice);
+    }
     const [totalCount] = await pool.query(
       `SELECT COUNT(*) as count FROM products WHERE occasion = ? ${priceCondition}`,
-      [occasion]
+      countQueryParams
     );
 
     const totalPages = Math.ceil(totalCount[0].count / limitNumber);
 
-    res.json({ products: rows, totalPages });
+    // Format products to encode images as Base64
+    const formattedProducts = rows.map(product => ({
+      ...product,
+      image: product.image ? `data:image/jpeg;base64,${product.image.toString('base64')}` : null,
+    }));
+
+    // Send the products and pagination info
+    res.json({ products: formattedProducts, totalPages });
   } catch (error) {
-    console.error(error);
+    console.error('Error fetching products by occasion:', error);
     res.status(500).json({ message: 'Error fetching products by occasion' });
   }
 };
+
 
 
 const getSizesByCategory = async (req, res) => {
@@ -188,7 +177,7 @@ const getProductCountByCategory = async (req, res) => {
 
 const getProductsByCategory = async (req, res) => {
   try {
-    const { category, subcategory } = req.params; // Get category and subcategory
+    const { category, subcategory } = req.params;
     const { page = 1, limit = 9, priceRange = 'all', size, occasion } = req.query;
 
     const pageNumber = parseInt(page, 10);
@@ -196,8 +185,8 @@ const getProductsByCategory = async (req, res) => {
     const offset = (pageNumber - 1) * limitNumber;
 
     // Initialize conditions for the SQL query
-    let conditions = 'WHERE category = ?'; // Ensure category is required
-    const queryParams = [category]; // Start with category parameter
+    let conditions = 'WHERE category = ?';
+    const queryParams = [category];
 
     // Add subcategory filter if exists
     if (subcategory) {
@@ -233,7 +222,6 @@ const getProductsByCategory = async (req, res) => {
       ${conditions}
       LIMIT ?, ?
     `;
-
     const productsParams = [...queryParams, offset, limitNumber];
 
     // Execute the query with parameters
@@ -244,13 +232,12 @@ const getProductsByCategory = async (req, res) => {
     const [totalCount] = await pool.query(countQuery, queryParams);
 
     const totalPages = Math.ceil(totalCount[0].count / limitNumber);
+
+    // Format products, encoding image data to Base64
     const formattedProducts = rows.map(product => ({
       ...product,
-      image: s3.getSignedUrl('getObject', {
-        Bucket: bucketName,
-        Key: product.image,  // Assuming `image` is the S3 key for each product
-        Expires: 60 * 60,    // URL expires in 1 hour
-  })}));
+      image: product.image ? `data:image/jpeg;base64,${product.image.toString('base64')}` : null,
+    }));
 
     // Send the filtered products and pagination info
     res.json({ products: formattedProducts, totalPages });
@@ -260,14 +247,15 @@ const getProductsByCategory = async (req, res) => {
   }
 };
 
+
 const getAllProducts = async (req, res) => {
   try {
-    const { page = 1, limit = 9 } = req.query; // Extract query parameters
+    const { page = 1, limit = 9 } = req.query;
     const pageNumber = parseInt(page, 10);
     const limitNumber = parseInt(limit, 10);
     const offset = (pageNumber - 1) * limitNumber;
 
-    // Fetch all products from the database
+    // Fetch all products with pagination
     const [rows] = await pool.query(`
       SELECT product_id, name, category, subcategory, occasion, image, price, stock, size 
       FROM products
@@ -276,22 +264,13 @@ const getAllProducts = async (req, res) => {
 
     // Fetch total count for pagination
     const [totalCount] = await pool.query(`SELECT COUNT(*) as count FROM products`);
-
     const totalPages = Math.ceil(totalCount[0].count / limitNumber);
 
-    // Format the image URLs for the fetched products
-    const formatProductImages = (products) => {
-      return products.map(product => ({
-        ...product,
-        image: s3.getSignedUrl('getObject', {
-          Bucket: bucketName,
-          Key: product.image,  // Assuming `image` is the S3 key for each product
-          Expires: 60 * 60,    // URL expires in 1 hour
-
-    })}));
-    };
-
-    const formattedProducts = formatProductImages(rows);
+    // Format the products to encode images as Base64
+    const formattedProducts = rows.map(product => ({
+      ...product,
+      image: product.image ? `data:image/jpeg;base64,${product.image.toString('base64')}` : null,
+    }));
 
     // Send all products and pagination info
     res.json({ products: formattedProducts, totalPages });
@@ -300,6 +279,7 @@ const getAllProducts = async (req, res) => {
     res.status(500).json({ message: 'Error fetching products' });
   }
 };
+
 
 const getOccasions = async (req, res) => {
   try {
@@ -337,25 +317,19 @@ const getCategories = async (req, res) => {
       GROUP BY category_name
     `);
 
-    // Format the result to return an array of subcategories for each category
+    // Format the categories to include subcategories as arrays and images in Base64
     const formattedCategories = rows.map(row => ({
       category_name: row.category_name,
-      // Format the image URL correctly
-      
-      image: `${req.protocol}://${req.get('host')}/${row.image.replace(/\\/g, '/')}`,
-      subcategories: row.subcategories.split(','),
+      image: row.image ? `data:image/jpeg;base64,${row.image.toString('base64')}` : null,
+      subcategories: row.subcategories.split(',')
     }));
 
     res.json({ categories: formattedCategories });
   } catch (error) {
-    console.error(error);
+    console.error('Error fetching categories:', error);
     res.status(500).json({ message: "Error fetching categories" });
   }
 };
-
-
-
-
 
 
 const getProductById = async (req, res) => {
@@ -372,15 +346,9 @@ const getProductById = async (req, res) => {
 
     const product = rows[0];
 
-    // Format the image URL
-    const signedUrl = s3.getSignedUrl('getObject', {
-      Bucket: bucketName,
-      Key: product.image,  // Assuming `image` is the S3 key for each product
-      Expires: 60 * 60,    // URL expires in 1 hour
-  });
+    // Convert the image to Base64 if it exists
+    product.image = product.image ? `data:image/jpeg;base64,${product.image.toString('base64')}` : null;
 
-  // Update product.image with the signed URL
-  product.image = signedUrl;
     // Fetch sizes associated with the product
     const [sizeRows] = await pool.query(
       'SELECT DISTINCT size FROM products WHERE name = ? AND category = ?',
@@ -398,23 +366,19 @@ const getProductById = async (req, res) => {
   }
 };
 
-
 const getReviewsByProductId = async (req, res) => {
-  const { productId } = req.params; // Extract productId from the request parameters
+  const { productId } = req.params;
 
   try {
-    // Query to fetch reviews for the product
     const [result] = await pool.query('SELECT * FROM reviews WHERE productId = ? ORDER BY createdAt DESC', [productId]);
 
-    // Check if there are reviews for the product
     if (result.length === 0) {
       return res.status(404).json({ message: 'No reviews found for this product' });
     }
 
-    // Send the reviews as a response
     res.status(200).json({
       message: 'Reviews fetched successfully',
-      data: result, // Send all reviews for the product
+      data: result, 
     });
   } catch (error) {
     console.error('Error fetching reviews:', error);
@@ -458,23 +422,19 @@ const addReview = async (req, res) => {
 };
 
 const addCartItem = async (req, res) => {
-  const { userId, product } = req.body; // Expecting userId and product details
-  console.log("userId", userId);
-  console.log("product", product);
+  const { userId, product } = req.body; 
 
   if (!userId || !product || !product.id || !product.quantity) {
     return res.status(400).json({ message: "User ID and product details are required." });
   }
 
   try {
-    // Check if the product already exists in the cart for the user
     const [existingItem] = await pool.query(
       "SELECT * FROM cart WHERE user_id = ? AND product_id = ? AND size = ?",
       [userId, product.id, product.size]
     );
 
     if (existingItem.length > 0) {
-      // Product already exists, so update the quantity
       const updatedQuantity = existingItem[0].quantity + product.quantity;
       await pool.query(
         "UPDATE cart SET quantity = ? WHERE user_id = ? AND product_id = ? AND size = ?",
@@ -482,10 +442,19 @@ const addCartItem = async (req, res) => {
       );
       return res.status(200).json({ message: "Cart item quantity updated." });
     } else {
-      // Product does not exist, insert a new item
+      // Fetch the image as a LONGBLOB from the products table and encode it as Base64
+      const [productImageResult] = await pool.query(
+        "SELECT image FROM products WHERE product_id = ?",
+        [product.id]
+      );
+
+      const imageBlob = productImageResult[0]?.image;
+      const base64Image = imageBlob ? `data:image/jpeg;base64,${imageBlob.toString('base64')}` : null;
+
+      // Insert a new cart item with the Base64 image
       const result = await pool.query(
         "INSERT INTO cart (user_id, product_id, quantity, product_name, size, price, image) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [userId, product.id, product.quantity, product.product_name, product.size, product.price, product.image]
+        [userId, product.id, product.quantity, product.product_name, product.size, product.price, base64Image]
       );
       return res.status(201).json({ message: "Item added to cart", cartId: result.insertId });
     }
@@ -495,9 +464,6 @@ const addCartItem = async (req, res) => {
   }
 };
 
-
-
-// Method to get cart items for a specific user
 const getCartItems = async (req, res) => {
   const { userId } = req.params;
 
@@ -509,10 +475,15 @@ const getCartItems = async (req, res) => {
     const [rows] = await pool.query('SELECT * FROM cart WHERE user_id = ?', [userId]);
 
     if (rows.length === 0) {
-      return res.json({ items: [] }); // Return an empty array for cart items
+      return res.json({ items: [] }); 
     }
 
-    res.json({ items: rows });
+    const formattedItems = rows.map(item => ({
+      ...item,
+      image: item.image ? `data:image/jpeg;base64,${item.image.toString('base64')}` : null,
+    }));
+
+    res.json({ items: formattedItems });
   } catch (error) {
     console.error('Error fetching cart items:', error);
     res.status(500).json({ message: 'Error fetching cart items' });
@@ -520,7 +491,6 @@ const getCartItems = async (req, res) => {
 };
 
 
-// Method to clear the cart for a specific user
 const clearCart = async (req, res) => {
   const { userId } = req.params;
   if (!userId) {
