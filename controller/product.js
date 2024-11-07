@@ -71,7 +71,7 @@ const addOccasion = async (req, res) => {
     // Insert the occasion name and image blob into the database
     const [result] = await pool.query(
       "INSERT INTO occasions (name) VALUES (?)",
-      [name, imageBlob]
+      [name]
     );
 
     res.status(201).json({ message: "Occasion added successfully", id: result.insertId });
