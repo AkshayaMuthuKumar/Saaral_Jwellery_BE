@@ -66,16 +66,11 @@ const addCategory = async (req, res) => {
 
 const addOccasion = async (req, res) => {
   const { name } = req.body;
-  if (!name || !req.file) {
-    return res.status(400).json({ message: "Name and image are required" });
-  }
 
   try {
-    const imageBlob = req.file.buffer;
-
     // Insert the occasion name and image blob into the database
     const [result] = await pool.query(
-      "INSERT INTO occasions (name, image) VALUES (?, ?)",
+      "INSERT INTO occasions (name) VALUES (?)",
       [name, imageBlob]
     );
 
