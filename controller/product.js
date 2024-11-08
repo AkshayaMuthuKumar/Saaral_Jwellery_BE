@@ -3,8 +3,17 @@ const multer = require('multer');
 const path = require('path');
 
 const storage = multer.memoryStorage();
-const upload = multer({ storage: multer.memoryStorage() });
 
+const upload = multer({
+  storage: storage,
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    if (ext !== '.mp4' && ext !== '.mov' && ext !== '.avi') {
+      return cb(new Error('Only video files are allowed'));
+    }
+    cb(null, true);
+  }
+});
 
 const addProduct = async (req, res) => {
   try {
@@ -173,7 +182,7 @@ const getProductCountByCategory = async (req, res) => {
 const getProductsByCategory = async (req, res) => {
   try {
     const { category, subcategory } = req.params;
-    const { page = 1, limit = 9, priceRange = 'all', size, occasion } = req.query;
+    const { page = 1, limit = 9, priceRange = 'all', size, occasion, search } = req.query;
 
     const pageNumber = parseInt(page, 10);
     const limitNumber = parseInt(limit, 10);
@@ -208,6 +217,12 @@ const getProductsByCategory = async (req, res) => {
         conditions += ' AND price BETWEEN ? AND ?';
         queryParams.push(minPrice, maxPrice);
       }
+    }
+
+    if (search) {
+      conditions += ' AND (name LIKE ? OR description LIKE ?)';
+      const searchPattern = `%${search}%`;
+      queryParams.push(searchPattern, searchPattern);
     }
 
     // Fetch products based on selected filters
@@ -526,6 +541,9 @@ const removeCartItem = async (req, res) => {
     return res.status(500).json({ message: "Error removing item from cart", error: error.message });
   }
 };
+
+
+
 
 
 module.exports = { getProductsByCategory, addProduct, upload, getCategories, getOccasions, addOccasion, getProductsByOccasion, getSizesByCategory, getAllProducts, getOccasions, addOccasion, getCategories, addCategory, getProductCountByCategory, getProductById, getReviewsByProductId, addReview, addCartItem, getCartItems, clearCart, removeCartItem };
